@@ -1,34 +1,26 @@
 ---
-title: "Exercício: SARIMA no comércio varejista brasileiro"
-format: html
+title: "SARIMA no comércio varejista: Amapá"
+author: "Caio Morelli"
+format:
+  html:
+    output-file: index.html
+    embed-resources: true
+    toc: true
 jupyter: python3
 ---
 
-## Sobre o exercício
+## Introdução
 
 A base é a **PMC** (Pesquisa Mensal do Comércio) do IBGE: índice de volume de vendas no **comércio varejista ampliado** (inclui veículos e materiais de construção), por **Unidade da Federação**, mensal de jan/2004 em diante. Base 2022 = 100, **sem ajuste sazonal**.
 
-Você receberá **uma UF de interesse**, e deve aplicar a análise abaixo:
+Estrutura do exercício:
 
-Setup
-
-1. Criar repositório no GitHub para o exercício, e configurar o GitHub Pages para servir o conteúdo do repositório.
-2. Clonar o repositório e criar um arquivo chamado `template-exercicio-sarima.qmd` (pode usar o template deste exercício, ou criar do zero, e pode usar jupyter notebook no lugar de Quarto, basta converter usando o comando `quarto convert`).
-3. Configure o `uv` com um `.venv` para gerenciar as dependências do exercício (pode usar o `requirements.txt` deste repositório como base, ou criar o seu do zero). Obs: Não é para subir a pasta `.venv` no GitHub, ele precisa estar no seu `.gitignore`.
-
-Código
-
-3. Análise descritiva (linha, ACF, PACF, diferenciação) e diagnóstico de tendência/sazonalidade.
-4. Testes de raiz unitária (ADF, KPSS) e estimativa de `ndiffs`.
-5. Ajuste de SARIMA via `AutoARIMA(season_length=12)`.
-6. Diagnóstico dos resíduos.
-7. Previsão de 24 meses à frente, com intervalos de 80% e 95%.
-
-Análise e entrega
-
-8. Discussão dos resultados (perguntas no final).
-9. Compilar este arquivo em um relatório em HTML chamado index.html e subir no repositório do GitHub que você criou para este lab. 
-10. Configure as github pages para servir o conteúdo do repositório, e compartilhe o link no formulário de entrega do BB.
+1. Análise descritiva (linha, ACF, PACF, diferenciação) e diagnóstico de tendência/sazonalidade.
+2. Testes de raiz unitária (ADF, KPSS) e estimativa de `ndiffs`.
+3. Ajuste de SARIMA via `AutoARIMA(season_length=12)`.
+4. Diagnóstico dos resíduos.
+5. Previsão de 24 meses à frente, com intervalos de 80% e 95%.
+6. Análise e discussão dos resultados.
 
 ## Setup
 
@@ -52,35 +44,428 @@ A base já foi pré-processada para conter apenas as colunas relevantes, e já n
 pmc = pd.read_csv("https://github.com/padsInsper/202634-fa/releases/download/data/pmc_volume_uf.csv")
 ```
 
-## Escolha sua UF
+## Dados
 
 ```{python}
 
-MINHA_UF = "Guiana Brasleira" 
-
+UF = "Amapá" 
 
 df_sf = (
-    pmc.query("uf == @MINHA_UF")
+    pmc.query("uf == @UF")
     .rename(columns={"uf": "unique_id", "data": "ds", "volume_idx": "y"})
     [["unique_id", "ds", "y"]]
     .reset_index(drop=True)
 )
 
-df_sf.head()
+df_sf.head(10)
 ```
 
 ## Análise descritiva
 
+### Nível
+```{python}
+df_sf.plot(x="ds", y="y", title=f"PMC - {UF}", figsize=(12, 4), grid=True);
+```
+
+É possível observar sazonalidade anual, com picos de vendas em dezembro e quedas em janeiro. A tendência de longo prazo é de crescimento, com algumas flutuações ao longo do período.
+
+### Descomposição sazonal (STL)
+```{python}
+from statsmodels.tsa.seasonal import STL
+stl = STL(df_sf.set_index("ds")["y"], period=12, seasonal=13)
+res = stl.fit()
+fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
+res.observed.plot(ax=axes[0], title=f"PMC - {UF} (observado)", grid=True)
+res.trend.plot(ax=axes[1], title=f"PMC - {UF} (tendência)", grid=True)
+res.seasonal.plot(ax=axes[2], title=f"PMC - {UF} (sazonal)", grid=True)
+res.resid.plot(ax=axes[3], title=f"PMC - {UF} (resíduos)", grid=True)
+plt.tight_layout()
+```
+
+A descomposição STL confirma a presença de sazonalidade anual, com picos consistentes em dezembro e quedas em janeiro. A tendência de longo prazo mostra crescimento, embora haja variações ao longo do tempo. Os resíduos parecem não apresentar padrão claro, sugerindo que a decomposição capturou bem os componentes da série. É possível notar uma perturbação nos resíduos em torno de 2020, possivelmente devido à Covid-19.
+
+### Boxplot por unidade de tempo (mês) para visualizar sazonalidade
+### Sazonalidade por mês e por ano
+
+```{python}
+meses = df_sf[["ds", "y"]].copy()
+meses["ds"] = pd.to_datetime(meses["ds"])
+meses["ano"] = meses["ds"].dt.year
+meses["mes"] = meses["ds"].dt.month
+meses.head()
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+
+# Boxplot por mês: quais meses são sistematicamente altos/baixos
+meses.boxplot(column="y", by="mes", ax=axes[0], grid=False)
+axes[0].set_title(f"Distribuição por mês ({UF})")
+axes[0].set_xlabel("Mês")
+
+# Uma linha por ano: a amplitude (distância pico–vale) muda com o nível?
+for ano, g in meses.groupby("ano"):
+    axes[1].plot(g["mes"], g["y"], color=plt.cm.viridis((ano - 2004) / 22), lw=1)
+axes[1].set_title("Padrão sazonal por ano (cor: 2004 → 2026)")
+axes[1].set_xlabel("Mês")
+
+fig.suptitle("")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+amp = (
+    meses.groupby("ano")["y"]
+    .agg(nivel_medio="mean", maximo="max", minimo="min", n_meses="count")
+    .query("n_meses == 12")          # só anos completos
+    .assign(
+        amplitude_pontos=lambda d: d["maximo"] - d["minimo"],
+        amplitude_pct=lambda d: 100 * (d["maximo"] - d["minimo"]) / d["nivel_medio"],
+    )
+    .round(1)
+)
+
+fig, ax1 = plt.subplots(figsize=(12, 4.5))
+
+# Eixo esquerdo: em pontos do índice
+ax1.plot(amp.index, amp["nivel_medio"], color="black", lw=1.5, marker="o", ms=3, label="Nível médio (pontos)")
+ax1.plot(amp.index, amp["amplitude_pontos"], color="C0", lw=1.5, marker="o", ms=3, label="Amplitude (pontos)")
+ax1.set_xlabel("Ano")
+ax1.set_ylabel("Pontos do índice (2022 = 100)")
+ax1.grid(alpha=0.3)
+
+# Eixo direito: amplitude em % do nível médio
+ax2 = ax1.twinx()
+ax2.plot(amp.index, amp["amplitude_pct"], color="C3", lw=1.5, ls="--", marker="s", ms=3, label="Amplitude (% do nível)")
+ax2.set_ylabel("Amplitude (% do nível médio)", color="C3")
+ax2.tick_params(axis="y", colors="C3")
+
+# Legenda única com as três séries
+h1, l1 = ax1.get_legend_handles_labels()
+h2, l2 = ax2.get_legend_handles_labels()
+ax1.legend(h1 + h2, l1 + l2, loc="upper left")
+
+ax1.set_title(f"Amplitude sazonal × nível médio por ano ({UF})")
+plt.tight_layout()
+plt.show()
+```
+
+A amplitude da sazonalidade parece se manter relativamente estável conforme o nível sobe, exceto por perturbações quando a série teve uma tendência de queda e no choque da Covid-19. Dessa forma não há evidência de que o log seja necessário para estabilizar a variância da série. A sazonalidade é consistente ao longo dos anos, com picos em dezembro e quedas em janeiro, reforçando a necessidade de modelar a sazonalidade no ajuste do modelo SARIMA, aditivo.
+
+### Função de diagnóstico (Nível + ACF/PACF + ADF/KPSS)
+
+```{python}
+# Converte a data (necessário para o eixo temporal e para o StatsForecast)
+df_sf["ds"] = pd.to_datetime(df_sf["ds"])
+y = df_sf.set_index("ds")["y"]
+
+def diagnostico(serie, nome):
+    """Série + ACF + PACF, e testes ADF e KPSS, para uma versão da série."""
+    serie = serie.dropna()
+
+    # ADF  - H0: existe raiz unitária
+    adf_stat, adf_p, adf_lags = adfuller(serie, autolag="AIC")[:3]
+    # KPSS - H0: a série é estacionária (em torno de um nível)
+    kpss_stat, kpss_p = kpss(serie, regression="c", nlags="auto")[:2]
+
+    print(nome)
+    print(f"  ADF : estatística = {adf_stat:.3f} | p-valor = {adf_p:.4f} | lags usados = {adf_lags}")
+    print(f"  KPSS: estatística = {kpss_stat:.3f} | p-valor = {kpss_p:.3f} (tabelado só entre 0,01 e 0,10)")
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    serie.plot(ax=axes[0], title=nome, grid=True);
+    plot_acf(serie, ax=axes[1], lags=36, zero=False, title=f"ACF: {nome}")
+    plot_pacf(serie, ax=axes[2], lags=36, zero=False, title=f"PACF: {nome}")
+    plt.tight_layout()
+    plt.show()
+```
+
+### Série em nível: testes ADF/KPSS e ACF/PACF
+
+```{python}
+diagnostico(y, "Nível")
+```
+
+Os testes ADF e KPSS indicam que a série não é estacionária, com p-valor do teste ADF > 0.05 e p-valor do teste KPSS < 0.05.
+
+O gráfico da ACF possui decaimento bastante lento, indicando sinal claro de não-estacionariedade e presença de raiz unitária. Os gráficos ACF e PACF sugerem a presença de sazonalidade, com picos significativos em múltiplos de 12 meses, indicando um padrão anual. Além disso, a tendência de longo prazo é evidente no gráfico de linha, reforçando a necessidade de diferenciação para tornar a série estacionária.
+
+### Primeira diferença (regular)
+
+```{python}
+diagnostico(y.diff(), "Δy (1ª diferença)")
+```
+
+A primeira diferença passou nos testes ADF e KPSS (ADF com p-valor < 0.01 e KPSS com p-valor > 0.10), mas esses dois testes avaliam apenas a raiz unitária regular (frequência zero), e não a raiz unitária sazonal. A ACF da Δy mantém autocorrelação alta e com decaimento lento nos lags sazonais (0,70 → 0,66 → 0,61 nos lags 12, 24 e 36), o mesmo padrão de não-estacionariedade que a série em nível mostrava nos primeiros lags, agora na escala sazonal. Ou seja, a Δy ainda não está pronta para um ARIMA não sazonal: falta tratar a sazonalidade estocástica. Vamos testar a diferenciação sazonal sozinha para verificar se ela, por si só, torna a série estacionária.
+
+### Diferença sazonal (lag 12)
+
+```{python}
+diagnostico(y.diff(12), "Δ₁₂y (diferença sazonal)")
+```
+
+No teste ADF a hipótese nula não é rejeitada. Não são reunidas evidências pra dizer que a raiz unitária não existe. Ao teste KPSS, com p>0.10, a hipótese nula também não é rejeitada, dessa vez, não trazendo evidências contra a estacionariedade. Ou seja, resultado é inconclusivo. Os gráficos ACF e PACF descrevem ACF com decaimento exponencial e PACF com corte abrupto, sugerindo um processo autoregressivo de ordem 1 (AR(1)) para a série sazonalmente diferenciada. Além disso, a PACF significativa no lag 12 indica a presença de um componente sazonal (AR sazonal ou MA sazonal). Os ecos nos lags 13 e 25 são a interação entre o AR(1) regular e esse componente sazonal. O eco no lag 25 indica que a estrutura sazonal alcança o lag 24, o que é compatível com P = 2 ou Q = 1, mas não com P = 1. 
+
+### Diferença sazonal + regular
+
+```{python}
+diagnostico(y.diff(12).diff(), "ΔΔ₁₂y (sazonal + regular)")
+```
+
+A série com diferenciação regular + diferenciação sazonal passou nos testes de estacionariedade, indicando que a série não parece mais possuir raiz unitária.
+
+Portanto, podemos suspeitar que os valores de `d` e `D` do modelo SARIMA serão 1 ou avaliar o cenário de uso de um modelo com `d`= 0 e `D`= 1. 
+
+No que isso acarreta? A diferença entre os dois cenários é que, no caso de `d`= 0, a previsão (que com 'D'=1 seria a previsão da variação anual) tende a se estabilizar em torno da média da série, enquanto no caso de `d`= 1, a previsão tende a seguir o último valor observado (random walk). Vamos ilustrar isso com um exemplo simples.
+
+```{python}
+h = np.arange(1, 25)
+phi, sigma, mu, y_T = 0.8, 1.0, 0.0, 10.0
+
+# AR(1) (d = 0): média prevista e variância do erro de previsão
+media_ar = mu + phi**h * (y_T - mu)
+var_ar = sigma**2 * (1 - phi**(2*h)) / (1 - phi**2)
+
+# Random walk (d = 1): média prevista e variância do erro de previsão
+media_rw = np.full(len(h), y_T)
+var_rw = sigma**2 * h
+
+fig, ax = plt.subplots(figsize=(10, 4))
+for media, var, nome in [(media_ar, var_ar, "AR(1), φ=0.8 (d=0)"),
+                         (media_rw, var_rw, "Random walk (d=1)")]:
+    ax.plot(h, media, label=nome)
+    ax.fill_between(h, media - 1.96*np.sqrt(var), media + 1.96*np.sqrt(var), alpha=0.2)
+ax.axhline(mu, ls="--", color="gray", label="média μ")
+ax.set_xlabel("Horizonte h (meses)")
+ax.set_title("Previsão e intervalo de 95%: d=0 vs d=1")
+ax.legend()
+plt.show()
+```
+
+Para o varejo do Amapá, `D`=1 é adequada, pois a série apresenta  sazonalidade verificada pela presença de decaimento lento nos lags sazonais da ACF da série diferenciada (1ª diferença), como já havíamos notado (Lags 12, 24 e 36 da ACF da Δy em 0,70 → 0,66 → 0,61). A ideia de que a previsão da variação anual deve se estabilizar no último valor observado do crescimento anual, acarretando na previsão de um crescimento persistente, parece mais realista no contexto, pois adicionar essa diferenciação permite indicar que uma variação de ritmo de crescimento pode ser persistente.
+
+Na ACF e na PACF da ΔΔ₁₂y (seção Diferença sazonal + regular), na escala sazonal, ACF tem corte abrupto no 1º lag e PACF um decaimento mais exponencial nos lags sazonais, sugerindo que o modelo SARIMA terá um componente MA sazonal de ordem 1. Ou seja, o valor de `Q` do modelo SARIMA será 1 e o valor de `P` será 0.    
+
+Na escala regular, não aparecem grandes autocorrelações, sugerindo os valores de `p` e `q` do modelo SARIMA serão 0 e 0.
+
+Dessa forma o SARIMA sugerido para o varejo do Amapá é (0,1,0)(0,1,1)[12].
+
 ## Modelagem
+
+### Estimativa de ndiffs e nsdiffs
+
+```{python}
+from statsforecast.arima import ndiffs, nsdiffs
+
+# nsdiffs: quantas diferenças sazonais (lag 12) a série em nível pede
+print("nsdiffs (nível, período 12):          ", nsdiffs(y.values, period=12))
+# ndiffs: quantas diferenças regulares a série pede (teste KPSS sequencial)
+print("ndiffs  (nível):                       ", ndiffs(y.values))
+print("ndiffs  (após diferença sazonal, Δ₁₂y):", ndiffs(y.diff(12).dropna().values))
+```
+
+O resultado de `nsdiffs` indica que a série em nível pede 1 diferença sazonal (D=1). O resultado de `ndiffs` indica que a série em nível pede 1 diferença regular (d=1), porém após aplicar a diferença sazonal, a série não pede mais diferenças regulares (d=0). Portanto, o modelo sugerido teria d=0 e D=1, divergindo da conclusão da análise anterior. O fato do procedimento utilizar o KPSS, que indicou estacionaridade na série sazonalmente diferenciada, explica a diferença de conclusão. A escolha final do modelo deve considerar tanto os testes quanto a análise visual da série e dos resíduos.
+
+### Candidato inicial × AutoARIMA
+
+```{python}
+from statsforecast.arima import arima_string
+
+modelos = [
+    ARIMA(order=(0, 1, 0), seasonal_order=(0, 1, 1), season_length=12, alias="Candidato"),
+    AutoARIMA(season_length=12, alias="AutoARIMA"),
+]
+sf = StatsForecast(models=modelos, freq="MS")
+sf.fit(df_sf[["unique_id", "ds", "y"]])
+
+for i, nome in enumerate(["Candidato", "AutoARIMA"]):
+    m = sf.fitted_[0, i].model_
+    print(nome, "→", arima_string(m), "| AICc:", round(m["aicc"], 2))
+    print("   coeficientes:", {k: round(float(v), 3) for k, v in m["coef"].items()})
+```
+
+O AutoARIMA, naturalmente, valida a decisão por D=1 e d=0, vinda da estimativa de ndiffs e nsdiffs. Via stepwise, o AutoARIMA chega a um modelo (1,0,0)(2,1,0)[12] com drift: p=1 e q=0, como observado na PACF da Δ₁₂y, mas com a parte sazonal modelada por P=2 e Q=0, no lugar do Q=1 da análise visual. O P=2 já havia aparecido como possibilidade na análise da Δ₁₂y, por causa do eco no lag 25. Além disso, o AutoARIMA incluiu um drift, que será discutido adiante. A diferença entre os valores adotados para d impede a comparação direta por AICc entre o candidato inicial e o AutoARIMA.
+
+### Candidato inicial com d=0 × AutoARIMA
+
+```{python}
+from statsforecast.arima import arima_string
+
+modelos = [
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12, alias="Candidato"),
+    AutoARIMA(season_length=12, alias="AutoARIMA"),
+]
+sf = StatsForecast(models=modelos, freq="MS")
+sf.fit(df_sf[["unique_id", "ds", "y"]])
+
+for i, nome in enumerate(["Candidato", "AutoARIMA"]):
+    m = sf.fitted_[0, i].model_
+    print(nome, "→", arima_string(m), "| AICc:", round(m["aicc"], 2))
+    print("   coeficientes:", {k: round(float(v), 3) for k, v in m["coef"].items()})
+```
+
+Com d=0, o modelo carregaria o p=1 e Q=1 observados na PACF da série sazonalmente diferenciada, sendo um modelo (1,0,0)(0,1,1)[12]. Agora a comparação direta via AICc é viável, e o AICc do AutoARIMA é maior (1660,8 contra 1636,7 do candidato), indicando que o modelo candidato tem melhor equilíbrio entre ajuste e número de parâmetros para a série do Amapá e seria o preferido pelo AICc. Ou seja, a busca stepwise do AutoARIMA não encontrou o melhor modelo que estava ao alcance dela.
+
+Vale notar que o coeficiente AR(1) do candidato ficou em 0,963, muito próximo de 1. Isso é coerente com o ADF inconclusivo na Δ₁₂y (p-valor = 0,15): a raiz unitária regular está no limite, e por isso o ndiffs (via KPSS) e a análise visual chegaram a conclusões diferentes sobre o valor de `d`.
+
+### Candidato com drift
+
+Há uma questão que o AICc sozinho não resolve. Com `d`=0, `D`=1 e sem constante, a previsão da variação anual (Δ₁₂y) decai para zero, ou seja, o modelo candidato prevê que o varejo do Amapá para de crescer no médio prazo. Isso vai contra o histórico da série, que mais que triplicou entre 2004 e 2025, e contra o argumento usado na escolha de `D`=1, de que um ritmo de crescimento pode ser persistente. O AutoARIMA tratou isso incluindo um drift, que num modelo com `D`=1 representa um crescimento anual médio constante. Vamos então testar o candidato com drift, combinando a estrutura da análise visual (p=1, Q=1) com o drift sugerido pelo AutoARIMA.
+
+```{python}
+modelos = [
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12, alias="Candidato"),
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12,
+          include_drift=True, alias="Candidato + drift"),
+    AutoARIMA(season_length=12, alias="AutoARIMA"),
+]
+sf = StatsForecast(models=modelos, freq="MS")
+sf.fit(df_sf[["unique_id", "ds", "y"]])
+
+for i, mod in enumerate(modelos):
+    m = sf.fitted_[0, i].model_
+    print(mod.alias, "→", arima_string(m), "| AICc:", round(m["aicc"], 2))
+    print("   coeficientes:", {k: round(float(v), 3) for k, v in m["coef"].items()})
+```
+
+O candidato com drift tem AICc de 1632,0, abaixo do candidato sem drift (1636,7) e do AutoARIMA (1660,8). O drift estimado (0,273 ponto do índice por mês, cerca de 3,3 pontos por ano) é próximo do drift do AutoARIMA (0,298), e o coeficiente AR(1) cai de 0,963 para 0,922, porque parte da persistência que o AR(1) absorvia passa a ser explicada pela tendência. Dessa forma, o candidato com drift passa a ser o modelo preferido pelo AICc, e os três modelos seguem para o diagnóstico dos resíduos e a previsão.
+
+## Diagnóstico dos resíduos
+
+```{python}
+from statsmodels.graphics.gofplots import qqplot
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+modelos_res = [
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12,
+          alias="Candidato"),
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12,
+          include_drift=True, alias="Candidato + drift"),
+    AutoARIMA(season_length=12, alias="AutoARIMA"),
+]
+sf_res = StatsForecast(models=modelos_res, freq="MS")
+sf_res.fit(df_sf[["unique_id", "ds", "y"]])
+
+for i, mod in enumerate(modelos_res):
+    nome = mod.alias
+    modelo = sf_res.fitted_[0, i].model_
+    p, q, P, Q, s, d, D = modelo["arma"]              # ordem da tupla no statsforecast
+    m = p + q + P + Q                                 # nº de parâmetros ARMA estimados
+
+    # Resíduo = observado - ajustado 1 passo à frente
+    resid = pd.Series(modelo["residuals"], index=df_sf["ds"])
+    resid = resid.iloc[d + D * s:]                    # descarta a inicialização das diferenças
+
+    print(f"{nome}: ({p},{d},{q})({P},{D},{Q})[{s}]  |  m = {m}")
+    print(f"  Resíduos: n = {len(resid)}, média = {resid.mean():.3f}, desvio = {resid.std():.3f}")
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+
+    # (1) Resíduos no tempo: média zero e variância constante
+    axes[0, 0].plot(resid.index, resid.values, color="#5B5B5B", lw=0.8)
+    axes[0, 0].axhline(0, color="#E50505", lw=1)
+    axes[0, 0].set_title("(1) Resíduos ao longo do tempo")
+    axes[0, 0].grid(alpha=0.3)
+
+    # (2) ACF dos resíduos: ausência de autocorrelação (inclusive nos lags sazonais)
+    plot_acf(resid, lags=36, zero=False, ax=axes[0, 1], title="(2) ACF dos resíduos")
+
+    # (3) Histograma + normal teórica
+    axes[1, 0].hist(resid, bins=30, density=True, color="#5B5B5B", alpha=0.6, edgecolor="white")
+    x = np.linspace(resid.min(), resid.max(), 200)
+    axes[1, 0].plot(x, np.exp(-0.5 * ((x - resid.mean()) / resid.std())**2)
+                    / (resid.std() * np.sqrt(2 * np.pi)),
+                    color="#E50505", lw=2, label="Normal teórica")
+    axes[1, 0].set_title("(3) Distribuição dos resíduos")
+    axes[1, 0].legend()
+    axes[1, 0].grid(alpha=0.3)
+
+    # (4) Q-Q plot: normalidade nas caudas
+    qqplot(resid, line="s", ax=axes[1, 1], markerfacecolor="#5B5B5B",
+           markeredgecolor="#5B5B5B", alpha=0.5)
+    axes[1, 1].set_title("(4) Q-Q plot (normalidade)")
+
+    fig.suptitle(f"Diagnóstico dos resíduos: {nome}")
+    plt.tight_layout()
+    plt.show()
+
+    # Ljung-Box - H0: os resíduos são ruído branco (p-valor alto é o resultado desejado)
+    lb = acorr_ljungbox(resid, lags=[12, 24], model_df=m)
+    lb.index.name = "lag (h)"
+    print(lb.round(4), "\n")
+```
+
+Os resíduos dos três modelos ficam em torno de zero, com os maiores desvios concentrados no choque da Covid-19, em 2020, que também explica as caudas mais pesadas que a normal no Q-Q plot. A variância dos resíduos aumenta a partir de 2015, acompanhando o crescimento do nível da série, o que reabre a discussão sobre o uso do log. Na ACF, os dois candidatos não deixam autocorrelação relevante nos lags sazonais, enquanto o AutoARIMA deixa um pico no lag 36. O candidato sem drift tem resíduos com média positiva, sinal de que subestima o crescimento da série. Pelo Ljung-Box, só o candidato com drift não rejeita a hipótese de ruído branco a 5%.
 
 ## Previsão · 24 meses à frente
 
+### Previsão de 24 meses: candidato, candidato + drift e AutoARIMA
+
+```{python}
+modelos_prev = [
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12,
+          alias="Candidato"),
+    ARIMA(order=(1, 0, 0), seasonal_order=(0, 1, 1), season_length=12,
+          include_drift=True, alias="Candidato + drift"),
+    AutoARIMA(season_length=12, alias="AutoARIMA"),
+]
+sf_prev = StatsForecast(models=modelos_prev, freq="MS")
+prev = sf_prev.forecast(df=df_sf[["unique_id", "ds", "y"]], h=24, level=[80, 95])
+
+nomes = [m.alias for m in modelos_prev]
+hist = df_sf[df_sf["ds"] >= "2019-01-01"]
+
+fig, axes = plt.subplots(1, len(nomes), figsize=(18, 5), sharey=True)
+for ax, nome in zip(axes, nomes):
+    ax.plot(hist["ds"], hist["y"], color="black", lw=1, label="Histórico")
+    ax.plot(prev["ds"], prev[nome], color="C3", lw=1.5, label="Previsão")
+    ax.fill_between(prev["ds"], prev[f"{nome}-lo-95"], prev[f"{nome}-hi-95"],
+                    color="C3", alpha=0.15, label="IP 95%")
+    ax.fill_between(prev["ds"], prev[f"{nome}-lo-80"], prev[f"{nome}-hi-80"],
+                    color="C3", alpha=0.30, label="IP 80%")
+    ax.set_title(nome)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper left")
+fig.suptitle(f"Previsão de 24 meses: varejo ampliado ({UF})")
+plt.tight_layout()
+plt.show()
+
+# Largura dos intervalos de 95% em alguns horizontes (em pontos do índice)
+largura = pd.DataFrame({
+    nome: (prev[f"{nome}-hi-95"] - prev[f"{nome}-lo-95"]).values
+    for nome in nomes
+}, index=range(1, 25)).loc[[1, 6, 12, 18, 24]].round(1)
+largura.index.name = "horizonte (meses)"
+largura
+```
+
+Os três modelos reproduzem a sazonalidade, com pico em dezembro e queda no início do ano, e ficam ancorados no histórico recente. A diferença está na tendência: o candidato sem drift prevê queda do nível, consequência de `d`=0 sem constante, enquanto o candidato com drift e o AutoARIMA mantêm o crescimento, o AutoARIMA de forma mais acentuada. O candidato sem drift também tem os intervalos que mais abrem com o horizonte, porque o AR(1) próximo de 1 acumula incerteza como um passeio aleatório.
+
+Considerando AICc, resíduos e previsão em conjunto, o modelo final para o varejo do Amapá é o candidato com drift, (1,0,0)(0,1,1)[12] com drift: tem o menor AICc, resíduos compatíveis com ruído branco e previsão de crescimento coerente com o histórico.
+
 ## Discussão
 
-Escreva 4-5 linhas comentando:
+A ACF/PACF da série original mostrou tendência (decaimento lento) e sazonalidade anual (picos nos lags 12, 24 e 36), coerente com o gráfico de linha. O AutoARIMA aplicou uma diferença sazonal e nenhuma regular, compensando a tendência com drift, e escolheu um AR(1), visível na PACF da Δ₁₂y, com AR sazonal de ordem 2, enquanto a análise visual indicava um MA sazonal, que teve AICc melhor. No modelo final, os resíduos se aproximam de ruído branco, sem padrão sazonal remanescente além do choque da Covid-19, e a previsão captura a sazonalidade e o crescimento, com intervalos que abrem bastante ao longo dos 24 meses. UFs de crescimento acelerado, como Roraima e Mato Grosso, tendem a repetir o `d`=0 com drift, enquanto economias grandes e diversificadas, como São Paulo, Bahia e Distrito Federal, tendem a pedir `d`=1 sem drift, como mostra a tabela abaixo.
 
-1. O ACF/PACF da série original sugeriu sazonalidade? E tendência? Bate com o que você viu no gráfico de linha?
-2. Quantas diferenças (regular e sazonal) o AutoARIMA aplicou? E os componentes AR/MA? Conseguiu observar isso no ACF/PACF?
-3. Os resíduos parecem white noise? Algum padrão remanescente sazonal?
-4. A previsão pareceu razoável visualmente (captura a sazonalidade, fica bem ancorada no histórico, intervalos abrem muito com o horizonte)?
-5. Que outras UFs você imagina que dariam um SARIMA bem diferente do seu (e por quê)? Pense em estados de regiões diferentes, com perfil econômico distinto.
+```{python}
+ufs = ["Amapá", "Roraima", "Mato Grosso", "São Paulo", "Bahia",
+       "Distrito Federal"]
+
+linhas = []
+for uf in ufs:
+    d_uf = (
+        pmc.query("uf == @uf")
+        .rename(columns={"uf": "unique_id", "data": "ds", "volume_idx": "y"})
+        .assign(ds=lambda d: pd.to_datetime(d["ds"]))
+        [["unique_id", "ds", "y"]]
+    )
+    sf_uf = StatsForecast(models=[AutoARIMA(season_length=12)], freq="MS")
+    sf_uf.fit(d_uf)
+    serie = d_uf.set_index("ds")["y"]
+    linhas.append({
+        "UF": uf,
+        "AutoARIMA": arima_string(sf_uf.fitted_[0, 0].model_),
+        "crescimento 2004→2025": f"{serie['2025'].mean() / serie['2004'].mean():.1f}x",
+    })
+
+pd.DataFrame(linhas)
+```

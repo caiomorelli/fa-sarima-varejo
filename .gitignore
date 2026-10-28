@@ -2,3 +2,5 @@
 __pycache__/
 .quarto/
 .ipynb_checkpoints/
+Interactive-1.ipynb
+*.quarto_ipynb
